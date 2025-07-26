@@ -11,12 +11,13 @@ use std::{
     path::Path,
 };
 use flate2::{
-    Compression,
+    read::DeflateDecoder,
     write::DeflateEncoder,
+    Compression,
 };
 
 mod common;
-pub mod crc32;
+mod crc32;
 
 use crate::common::{
     CentralDirectoryHeader,
@@ -105,18 +106,24 @@ impl Writer {
 
         // write central directory
         // write central directory header
-        let zip64_extra_field = Zip64ExtraField {
-            header_id: Zip64ExtraField::HEADER_ID,
-            data_size: 0, // ignore, will auto set in `select_to_bytes`
-            uncompressed_size,
-            compressed_size,
-            relative_offset_of_local_header: cd_pos as u64, // reverse relative offset to file start
-            disk_number_start: 0, // no multiple volume
-        }.select_to_bytes(&[
-            Zip64ExtraFieldSelect::UncompressedSize,
-            Zip64ExtraFieldSelect::CompressedSize,
-            Zip64ExtraFieldSelect::RelativeOffsetOfLocalHeader,
-        ]);
+        let use_zip64_cd_header =
+            compressed_size >= u32::MAX as u64 ||
+            uncompressed_size >= u32::MAX as u64 ||
+            cd_pos >= u32::MAX as u64;
+        let zip64_extra_field = if use_zip64_cd_header {
+            Some(Zip64ExtraField {
+                header_id: Zip64ExtraField::HEADER_ID,
+                data_size: 0, // ignore, will auto set in `select_to_bytes`
+                uncompressed_size,
+                compressed_size,
+                relative_offset_of_local_header: cd_pos as u64, // reverse relative offset to file start
+                disk_number_start: 0, // no multiple volume
+            }.select_to_bytes(&[
+                Zip64ExtraFieldSelect::UncompressedSize,
+                Zip64ExtraFieldSelect::CompressedSize,
+                Zip64ExtraFieldSelect::RelativeOffsetOfLocalHeader,
+            ]))
+        } else { None };
         let central_directory_header = CentralDirectoryHeader {
             signature: CentralDirectoryHeader::SIGNATURE,
             version_made_by: TARGET_ZIP_VERSION,
@@ -126,10 +133,10 @@ impl Writer {
             last_modified_file_time: 0, // nobody cares
             last_modified_file_date: 0, // nobody cares
             crc_32: self.crc_32,
-            compressed_size: u32::MAX, // actual value is stored in zip64 extra field
-            uncompressed_size: u32::MAX, // actual value is stored in zip64 extra field
+            compressed_size: if zip64_extra_field.is_none() { compressed_size as u32 } else { u32::MAX },
+            uncompressed_size: if zip64_extra_field.is_none() { uncompressed_size as u32 } else { u32::MAX },
             file_name_length: self.local_file_name.len() as u16,
-            extra_field_length: zip64_extra_field.len() as u16,
+            extra_field_length: if let Some(z64) = zip64_extra_field.as_ref() { z64.len() as u16 } else { 0 },
             file_comment_length: 0, // no comment
             disk_number_start: 0, // no multiple volume
             internal_file_attributes: 0,
@@ -138,7 +145,9 @@ impl Writer {
         }.to_bytes();
         file.write_all(&central_directory_header)?;
         file.write_all(&self.local_file_name.as_encoded_bytes())?;
-        file.write_all(&zip64_extra_field)?;
+        if let Some(z64) = zip64_extra_field.as_ref() {
+            file.write_all(&z64)?;
+        }
         let cd_size = file.stream_position()? - cd_pos;
 
         // write end of central direction
@@ -172,11 +181,11 @@ impl Writer {
         // write end of central directory record
         let end_of_central_directory_record = EndOfCentralDirectoryRecord {
             signature: EndOfCentralDirectoryRecord::SIGNATURE,
-            number_of_this_disk:                                                           if use_zip64_ending { u16::MAX } else { 0 },
-            number_of_the_disk_with_the_start_of_the_central_directory:                    if use_zip64_ending { u16::MAX } else { 0 },
-            total_number_of_entries_in_the_central_directory:                              if use_zip64_ending { u16::MAX } else { 1 },
-            total_number_of_entries_in_the_central_directory_on_this_disk:                 if use_zip64_ending { u16::MAX } else { 1 },
-            size_of_the_central_directory:                                                 if use_zip64_ending { u32::MAX } else { cd_size as u32 },
+            number_of_this_disk: if use_zip64_ending { u16::MAX } else { 0 },
+            number_of_the_disk_with_the_start_of_the_central_directory: if use_zip64_ending { u16::MAX } else { 0 },
+            total_number_of_entries_in_the_central_directory: if use_zip64_ending { u16::MAX } else { 1 },
+            total_number_of_entries_in_the_central_directory_on_this_disk: if use_zip64_ending { u16::MAX } else { 1 },
+            size_of_the_central_directory: if use_zip64_ending { u32::MAX } else { cd_size as u32 },
             offset_of_start_of_central_directory_with_respect_to_the_starting_disk_number: if use_zip64_ending { u32::MAX } else { cd_pos as u32 },
             zip_file_comment_length: 0,
         }.to_bytes();
@@ -186,7 +195,7 @@ impl Writer {
     }
 }
 
-impl std::io::Write for Writer {
+impl io::Write for Writer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let len = self.deflate_writer.write(buf)?;
         self.crc_32 = crc32::run(self.crc_32, &buf[0..len]);
@@ -199,9 +208,40 @@ impl std::io::Write for Writer {
 }
 
 
+/// Read a zip file that save by `singletonzip` itself,
+/// this is not a general zip file reader.
+pub struct Reader {
+    deflate_reader: DeflateDecoder<File>,
+}
+impl Reader {
+    pub fn open(path: &Path) -> io::Result<Reader> {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Current(26))?;
+        let file_name_length = read_u16(&mut file)?;
+        file.seek(SeekFrom::Current(22 + file_name_length as i64))?;
+
+        Ok(Self {
+            deflate_reader: DeflateDecoder::new(file),
+        })
+    }
+}
+
+impl io::Read for Reader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.deflate_reader.read(buf)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
+
+    const ZERO_ZIP: &str = "test.zero.zip";
+    const SMALL_ZIP: &str = "test.small.txt.zip";
+    const SMALL_STR: &str = "The quick brown fox jumps over the lazy dog";
 
     struct PcgXshRr { // https://www.pcg-random.org
         state: u64,
@@ -211,9 +251,11 @@ mod tests {
         const MUL: u64 = 0x5851F42D4C957F2D;
 
         fn new(seed: u64) -> Self {
-            let mut this = Self { state: seed.wrapping_add(Self::INC) };
-            this.get();
-            this
+            Self { state: seed
+                .wrapping_add(Self::INC)
+                .wrapping_mul(Self::MUL)
+                .wrapping_add(Self::INC)
+            }
         }
 
         fn get(&mut self) -> u32 {
@@ -229,21 +271,22 @@ mod tests {
 
     #[test]
     fn zero_write() {
-        let w = Writer::create(Path::new("zero.zip")).unwrap();
+        let w = Writer::create(Path::new(ZERO_ZIP)).unwrap();
         w.finish().unwrap();
     }
 
     #[test]
     fn small_write() {
-        let mut w = Writer::create(Path::new("small.txt.zip")).unwrap();
-        w.write_all("The quick brown fox jumps over the lazy dog".as_bytes()).unwrap();
+        let mut w = Writer::create(Path::new(SMALL_ZIP)).unwrap();
+        w.write_all(SMALL_STR.as_bytes()).unwrap();
         w.finish().unwrap();
     }
 
-    /// BUG: underlying panic when using `zlib-rs` as `flate2` backend
+    /// BUG: underlying panic when using `zlib-rs` as `flate2` backend,
+    /// C backends have not been tested yet (no C env in my machine).
     #[test]
     fn big_write() {
-        let mut w = Writer::create(Path::new("big.dat.zip")).unwrap();
+        let mut w = Writer::create(Path::new("test.big.dat.zip")).unwrap();
 
         let buffer_size = 32 * 1024 * 1024;
         let mut rng = PcgXshRr::new(0);
@@ -262,4 +305,28 @@ mod tests {
         println!("count: {}", count);
         w.finish().unwrap();
     }
+
+    #[test]
+    fn zero_read() {
+        zero_write();
+        let mut r = Reader::open(Path::new(ZERO_ZIP)).unwrap();
+        let mut buf = Vec::new();
+        r.read_to_end(&mut buf).unwrap();
+        assert!(buf.len() == 0);
+    }
+
+    #[test]
+    fn small_read() {
+        small_write();
+        let mut r = Reader::open(Path::new(SMALL_ZIP)).unwrap();
+        let mut s = String::new();
+        r.read_to_string(&mut s).unwrap();
+        assert!(s.eq(SMALL_STR));
+    }
+}
+
+fn read_u16(r: &mut impl io::Read) -> io::Result<u16> {
+    let mut buf = [0u8; 2];
+    r.read_exact(&mut buf)?;
+    Ok(u16::from_le_bytes(buf))
 }
