@@ -133,15 +133,15 @@ impl Writer {
             last_modified_file_time: 0, // nobody cares
             last_modified_file_date: 0, // nobody cares
             crc_32: self.crc_32,
-            compressed_size: if zip64_extra_field.is_none() { compressed_size as u32 } else { u32::MAX },
-            uncompressed_size: if zip64_extra_field.is_none() { uncompressed_size as u32 } else { u32::MAX },
+            compressed_size: if zip64_extra_field.is_some() { u32::MAX } else { compressed_size as u32 },
+            uncompressed_size: if zip64_extra_field.is_some() { u32::MAX } else { uncompressed_size as u32 },
             file_name_length: self.local_file_name.len() as u16,
             extra_field_length: if let Some(z64) = zip64_extra_field.as_ref() { z64.len() as u16 } else { 0 },
             file_comment_length: 0, // no comment
             disk_number_start: 0, // no multiple volume
             internal_file_attributes: 0,
             external_file_attributes: 0,
-            relative_offset_of_local_header: u32::MAX, // actual value is stored in zip64 extra field
+            relative_offset_of_local_header: if zip64_extra_field.is_some() { u32::MAX } else { cd_pos as u32 },
         }.to_bytes();
         file.write_all(&central_directory_header)?;
         file.write_all(&self.local_file_name.as_encoded_bytes())?;
