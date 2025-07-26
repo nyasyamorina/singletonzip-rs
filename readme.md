@@ -16,7 +16,7 @@ fn main() {
     w.finish().unwarp();
 
     // read
-    let mut r = Reader::open("mytext.txt.zip").unwarp();
+    let mut r = Reader::open(Path::new("mytext.txt.zip")).unwarp();
     let mut s = String::new();
     r.read_to_string(&mut s).unwarp();
 

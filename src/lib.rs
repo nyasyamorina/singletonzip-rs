@@ -138,7 +138,7 @@ impl Writer {
             file_name_length: self.local_file_name.len() as u16,
             extra_field_length: if let Some(z64) = zip64_extra_field.as_ref() { z64.len() as u16 } else { 0 },
             file_comment_length: 0, // no comment
-            disk_number_start: 0, // no multiple volume
+            disk_number_start: 0, // no multiple volumes
             internal_file_attributes: 0,
             external_file_attributes: 0,
             relative_offset_of_local_header: if zip64_extra_field.is_some() { u32::MAX } else { cd_pos as u32 },
