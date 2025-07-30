@@ -217,8 +217,9 @@ impl Reader {
     pub fn open(path: &Path) -> io::Result<Reader> {
         let mut file = File::open(path)?;
         file.seek(SeekFrom::Current(26))?;
-        let file_name_length = read_u16(&mut file)?;
-        file.seek(SeekFrom::Current(22 + file_name_length as i64))?;
+        let file_name_length = read_u16(&mut file)? as i64;
+        let extra_field_length = read_u16(&mut file)? as i64;
+        file.seek(SeekFrom::Current(file_name_length + extra_field_length))?;
 
         Ok(Self {
             deflate_reader: DeflateDecoder::new(file),
